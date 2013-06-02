@@ -1,22 +1,16 @@
 package server
 
 import (
-	"github.com/bmizerany/assert"
-	"io/ioutil"
-	"net/http"
+	"github.com/benmills/quiz"
+	"log"
 	"net/http/httptest"
-	"strings"
 	"testing"
+
+	"goak/httpclient"
 )
 
-func httpRequest(method string, url string, data string) (int, string) {
-	request, _ := http.NewRequest(method, url, strings.NewReader(data))
-	client := http.Client{}
-	response, _ := client.Do(request)
-	rawBody, _ := ioutil.ReadAll(response.Body)
-
-	return response.StatusCode, string(rawBody)
-}
+type NullWriter int
+func (NullWriter) Write([]byte) (int, error) { return 0, nil }
 
 type TestNode struct {
 	*httptest.Server
@@ -24,65 +18,88 @@ type TestNode struct {
 }
 
 func testServer() *TestNode {
-	goakServer := New()
-	return &TestNode{httptest.NewServer(goakServer.Handler()), goakServer}
+	nullLogger := log.New(new(NullWriter), "", 0)
+	goakServer := New("localhost:someport", nullLogger)
+	httpServer := httptest.NewServer(goakServer.Handler())
+	goakServer.SetURL(httpServer.URL)
+
+	return &TestNode{httpServer, goakServer}
 }
 
 func TestAddAKey(t *testing.T) {
+	test := quiz.Test(t)
+
 	server := testServer()
 	defer server.Close()
 
-	statusCode, body := httpRequest("PUT", server.URL+"/data/mykey", "bar")
+	statusCode, body := httpclient.Put(server.URL+"/data/mykey", "bar")
 
-	assert.Equal(t, 201, statusCode)
-	assert.Equal(t, "bar", body)
+	test.Expect(statusCode).ToEqual(201)
+	test.Expect(body).ToEqual("bar")
 }
 
 func TestFetchKey(t *testing.T) {
+	test := quiz.Test(t)
+
 	server := testServer()
 	defer server.Close()
 
-	httpRequest("PUT", server.URL+"/data/mykey", "bar")
-	statusCode, body := httpRequest("GET", server.URL+"/data/mykey", "bar")
+	httpclient.Put(server.URL+"/data/mykey", "bar")
+	statusCode, body := httpclient.Get(server.URL+"/data/mykey", "bar")
 
-	assert.Equal(t, 200, statusCode)
-	assert.Equal(t, "bar", body)
+	test.Expect(statusCode).ToEqual(200)
+	test.Expect(body).ToEqual("bar")
 }
 
 func TestFetchUnknownKey(t *testing.T) {
+	test := quiz.Test(t)
+
 	server := testServer()
 	defer server.Close()
 
-	statusCode, _ := httpRequest("GET", server.URL+"/data/mykey", "bar")
+	statusCode, _ := httpclient.Get(server.URL+"/data/mykey", "bar")
 
-	assert.Equal(t, 404, statusCode)
+	test.Expect(statusCode).ToEqual(404)
 }
 
 func TestUpdateKey(t *testing.T) {
+	test := quiz.Test(t)
+
 	server := testServer()
 	defer server.Close()
 
-	httpRequest("PUT", server.URL+"/data/mykey", "bar")
-	httpRequest("PUT", server.URL+"/data/mykey", "baz")
-	statusCode, body := httpRequest("GET", server.URL+"/data/mykey", "")
+	httpclient.Put(server.URL+"/data/mykey", "bar")
+	httpclient.Put(server.URL+"/data/mykey", "baz")
+	statusCode, body := httpclient.Get(server.URL+"/data/mykey", "")
 
-	assert.Equal(t, 200, statusCode)
-	assert.Equal(t, "baz", body)
+	test.Expect(statusCode).ToEqual(200)
+	test.Expect(body).ToEqual("baz")
 }
 
 func TestFetchesAcrossNodes(t *testing.T) {
-	server1 := testServer()
-	defer server1.Close()
-	server2 := testServer()
-	defer server2.Close()
+	test := quiz.Test(t)
 
-	server1.node.AddPeer(server2.URL)
-	server2.node.AddPeer(server1.URL)
+	serverA := testServer()
+	defer serverA.Close()
+	serverB := testServer()
+	defer serverB.Close()
 
-	statusCode, _ := httpRequest("PUT", server1.URL+"/data/mykey", "bar")
-	assert.Equal(t, 201, statusCode)
+	httpclient.Put(serverA.URL+"/peers/join", serverB.URL)
 
-	statusCode2, body := httpRequest("GET", server2.URL+"/data/mykey", "")
-	assert.Equal(t, 200, statusCode2)
-	assert.Equal(t, "bar", body)
+	// "a"'s hash will be stored on serverB
+	key := "a"
+
+	var statusCode int
+	var body string
+
+	statusCode, _ = httpclient.Put(serverA.URL+"/data/"+key, "bar")
+	test.Expect(statusCode).ToEqual(201)
+
+	statusCode, body = httpclient.Get(serverB.URL+"/data/"+key, "")
+	test.Expect(statusCode).ToEqual(200)
+	test.Expect(body).ToEqual("bar")
+
+	statusCode, body = httpclient.Get(serverA.URL+"/data/"+key, "")
+	test.Expect(statusCode).ToEqual(200)
+	test.Expect(body).ToEqual("bar")
 }

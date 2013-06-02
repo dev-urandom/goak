@@ -6,63 +6,64 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
+
+	"goak/httpclient"
+	"goak/peer"
 )
 
 type Server struct {
-	values  map[string]string
-	peer    string
-	running bool
+	*peer.Peer
+	values map[string]string
+	logger *log.Logger
 }
 
-func New() *Server {
-	return &Server{
-		values: make(map[string]string),
-		peer:   "",
-	}
-}
-
-func (server *Server) AddPeer(peer string) {
-	server.peer = peer
-}
-
-func (server *Server) hasPeer() bool {
-	return server.peer != ""
+func New(url string, logger *log.Logger) *Server {
+	peer := peer.New(url, logger)
+	return &Server{peer, make(map[string]string), logger}
 }
 
 func (server *Server) Handler() http.Handler {
 	m := pat.New()
+
+	server.Peer.Handler(m)
 
 	m.Put("/data/:key", http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		key := request.URL.Query().Get(":key")
 		body, _ := ioutil.ReadAll(request.Body)
 		value := string(body)
 
-		server.values[key] = value
-		w.WriteHeader(201)
-		io.WriteString(w, value)
+		destinationAddress := server.PeerAddressForKey(key)
+
+		if server.URL() == destinationAddress {
+			server.logger.Printf("Storing '%s'->'%s'", key, value)
+			server.values[key] = value
+			w.WriteHeader(201)
+			io.WriteString(w, value)
+		} else {
+			server.logger.Printf("Passing off '%s'->'%s' to %s", key, value, destinationAddress)
+			statusCode, response := httpclient.Put(destinationAddress+"/data/"+key, value)
+			w.WriteHeader(statusCode)
+			io.WriteString(w, response)
+		}
 	}))
 
 	m.Get("/data/:key", http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		key := request.URL.Query().Get(":key")
-		value, ok := server.values[key]
 
-		if !ok {
-			if server.hasPeer() {
-				response, _ := http.Get(server.peer + "/data/" + key)
-				if response.StatusCode == 200 {
-					body, _ := ioutil.ReadAll(response.Body)
-					value = string(body)
-					w.WriteHeader(200)
-					io.WriteString(w, value)
-				} else {
-					w.WriteHeader(404)
-				}
+		destinationAddress := server.PeerAddressForKey(key)
+
+		if server.URL() == destinationAddress {
+			value, ok := server.values[key]
+			if ok {
+				w.WriteHeader(200)
+				io.WriteString(w, value)
 			} else {
 				w.WriteHeader(404)
 			}
 		} else {
-			w.WriteHeader(200)
-			io.WriteString(w, value)
+			statusCode, response := httpclient.Get(destinationAddress+"/data/"+key, "")
+			w.WriteHeader(statusCode)
+			io.WriteString(w, response)
 		}
 	}))
 
